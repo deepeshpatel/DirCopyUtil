@@ -386,35 +386,39 @@ public class DirectoryCopyUtilTest {
             //   ├── linkA → linkB
             //   └── linkB → real.txt
 
+            // Create structure
             Path realFile = createFile(tempSourceDir, "real.txt", 100);
             Path linkB = tempSourceDir.resolve("linkB");
             Path linkA = tempSourceDir.resolve("linkA");
             Files.createSymbolicLink(linkB, Path.of("real.txt"));
             Files.createSymbolicLink(linkA, Path.of("linkB"));
 
+            // Perform copy
             var copyOperation = copyUtil.copyDirectory(tempSourceDir, tempTargetDir);
             copyOperation.getFuture().get(10, TimeUnit.SECONDS);
 
+            // Verify
             Path copiedLinkA = tempTargetDir.resolve("linkA");
             Path copiedLinkB = tempTargetDir.resolve("linkB");
 
-            // Verify chain structure (absolute paths)
+            // Both links should use absolute paths in target directory
             assertEquals(
                     tempTargetDir.resolve("linkB"),
                     Files.readSymbolicLink(copiedLinkA),
-                    "linkA should point to linkB (absolute)"
+                    "linkA should point to linkB"
             );
             assertEquals(
                     tempTargetDir.resolve("real.txt"),
                     Files.readSymbolicLink(copiedLinkB),
-                    "linkB should point to real.txt (absolute)"
+                    "linkB should point to real.txt"
             );
 
-            // Verify chain resolution
+            // Verify resolution
             assertTrue(
                     Files.isSameFile(tempTargetDir.resolve("real.txt"), copiedLinkA),
                     "Chained symlinks should resolve to the real file"
-            );        }
+            );
+        }
 
         @Test
         void testDirectorySymlink() throws Exception {

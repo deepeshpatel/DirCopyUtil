@@ -3,9 +3,7 @@ package io.github.deepeshpatel.tools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
@@ -85,12 +83,12 @@ public class DirectoryCopyUtil {
         public long getTotalDataSize() { return totalDataSize; }
         public long getDataCopied() { return dataCopied.get(); }
         public long getStartTime() { return startTime; }
-        //public void setStartTime(long startTime) { this.startTime = startTime; }
 
         @Override
         public String toString() {
             return "Stats{" +
                     "filesCopied=" + filesCopied +
+                    ", skippedFiles=" + skippedFiles +
                     ", failedFiles=" + failedFiles +
                     ", errorSummaries=" + errorSummaries +
                     ", warningSummaries=" + warningSummaries +
@@ -99,6 +97,7 @@ public class DirectoryCopyUtil {
                     ", totalDataSize=" + totalDataSize +
                     ", dataCopied=" + dataCopied +
                     ", startTime=" + startTime +
+                    ", endTime=" + endTime +
                     '}';
         }
 
@@ -106,10 +105,12 @@ public class DirectoryCopyUtil {
             return "Files Copied=" + filesCopied +
                     "\nFiles Skipped=" + skippedFiles.size() +
                     "\nFiles Failed=" + failedFiles.size() +
+                    "\nFiles Overwritten=" + overwrittenFiles.size() +
                     "\nTotal Files=" + totalFiles +
                     "\nTotal Data=" + totalDataSize +
                     "\nData Copied=" + dataCopied +
-                    "\nstartTime=" + startTime;
+                    "\nstartTime=" + startTime +
+                    "\nendTime=" + endTime;
         }
     }
 
@@ -153,8 +154,8 @@ public class DirectoryCopyUtil {
                 try {
                     copyAllFromSourceToTarget();
                 } catch (IOException e) {
-
                     handleError("Error during copy operation: ",e, source);
+                    Thread.currentThread().interrupt();
                 } finally {
                     shutdownExecutors();
                 }
@@ -218,7 +219,6 @@ public class DirectoryCopyUtil {
         }
 
         private void copyFilesAndDirectories(Path source, Path target) {
-
             CountDownLatch latch = new CountDownLatch((int)stats.totalFiles);
 
             for (Path item : filesTobeCopies) {
@@ -228,21 +228,29 @@ public class DirectoryCopyUtil {
                 }
 
                 Path targetItem = target.resolve(source.relativize(item));
+                logger.debug("Processing item: {} -> {}", item, targetItem);
 
-                if(isDirectory(item)) {
+                if (isDirectory(item)) {
+                    logger.debug("Item {} is a directory", item);
                     createDirectory(targetItem);
                     continue;
                 }
 
                 executor.submit(() -> {
                     try {
-                        if(Files.isSymbolicLink(item)) {
+                        if (Files.isSymbolicLink(item)) {
+                            logger.debug("Item {} is a symlink, copying as symlink", item);
                             copySymbolicLink(item, targetItem);
+                        } else if (MacOSAliasCopyUtil.isMacOSAlias(item)) {
+                            logger.debug("Item {} is a macOS Alias, copying as alias", item);
+                            MacOSAliasCopyUtil.copyMacOsAlias(item, targetItem, this.source, this.target,
+                                    copyOptions, p -> recordFileCopyStats(p, 0));
                         } else {
+                            logger.debug("Item {} is not a symlink or alias, copying as file", item);
                             copySingleFile(item, targetItem);
                         }
                     } catch (Exception e) {
-                        handleError("Error copying symbolic link", e, item);
+                        handleError("Error copying item", e, item);
                     } finally {
                         latch.countDown();
                     }
@@ -276,41 +284,34 @@ public class DirectoryCopyUtil {
             if (isCancelled()) return;
 
             Path linkTarget = Files.readSymbolicLink(source);
-            Path sourceRoot = source.getParent();  // Parent directory of the symlink
+            Path sourceBase = this.source;
+            Path targetBase = this.target;
+
+            logger.debug("Symlink {} points to {}", source, linkTarget);
+
+            Path resolvedPath = linkTarget.isAbsolute() ? linkTarget : source.getParent().resolve(linkTarget).normalize();
+            logger.debug("Resolved path: {}", resolvedPath);
 
             Path finalLinkTarget;
-
-            if (linkTarget.isAbsolute()) {
-                // Case 1: Absolute path inside source directory
-                if (linkTarget.startsWith(sourceRoot)) {
-                    // Convert source absolute path → target absolute path
-                    Path relativePath = sourceRoot.relativize(linkTarget);
-                    finalLinkTarget = target.getParent().resolve(relativePath);
-                }
-                // Case 2: Absolute path outside source directory
-                else {
-                    finalLinkTarget = linkTarget;  // Preserve as-is
-                }
-            }
-            else {
-                // Resolve relative path against source directory first
-                Path resolvedPath = sourceRoot.resolve(linkTarget).normalize();
-
-                // Case 3: Relative path points inside source
-                if (resolvedPath.startsWith(sourceRoot)) {
-                    // Rebase to target directory
-                    Path relativePath = sourceRoot.relativize(resolvedPath);
-                    finalLinkTarget = target.getParent().resolve(relativePath);
-                }
-                // Case 4: Relative path points outside source
-                else {
-                    finalLinkTarget = linkTarget;  // Preserve original relative path
-                }
+            if (resolvedPath.startsWith(sourceBase)) {
+                Path relativePath = sourceBase.relativize(resolvedPath);
+                finalLinkTarget = targetBase.resolve(relativePath);
+                logger.debug("Internal symlink, rebasing to {}", finalLinkTarget);
+            } else {
+                finalLinkTarget = linkTarget;
+                logger.debug("External symlink, preserving as {}", finalLinkTarget);
             }
 
-            Files.createSymbolicLink(target, finalLinkTarget);
+            try {
+                Files.createSymbolicLink(target, finalLinkTarget);
+                logger.debug("Created symlink {} -> {}", target, finalLinkTarget);
+            } catch (IOException e) {
+                logger.error("Failed to create symlink {} -> {}", target, finalLinkTarget, e);
+                throw e; // Ensure the exception propagates
+            }
             recordFileCopyStats(source, 0);
         }
+
 
         private void copySingleFile(Path source, Path target) {
             if (isCancelled()) return;
