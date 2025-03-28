@@ -3,16 +3,15 @@ package io.github.deepeshpatel.tools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -32,87 +31,15 @@ import static io.github.deepeshpatel.tools.SimpleProgressCallback.formatSize;
  */
 public class DirectoryCopyUtil {
     private static final Logger logger = LoggerFactory.getLogger(DirectoryCopyUtil.class);
-    private static final int DEFAULT_BUFFER_SIZE = 1024 * 1024 * 10; // 10MB
+    private static final int DEFAULT_BUFFER_SIZE = 1024 * 1024 * 100; // 100MB
     private static final long LARGE_FILE_THRESHOLD = 1024 * 1024 * 20; // 20MB
 
     private final long progressUpdateInterval;
     private final int threadPoolSize;
     private final Set<CopyOption> copyOptions;
     private final int bufferSize;
-    private final Consumer<Stats> progressCallback;
+    private final Consumer<CopyOperationStats> progressCallback;
 
-    /**
-     * Statistics for a copy operation, tracking progress and outcomes.
-     * <p>
-     * All counters are thread-safe using atomic operations.
-     */
-    public static class Stats {
-        private final AtomicInteger filesCopied;
-        private final Set<String> skippedFiles = new HashSet<>();
-        private final Set<String> failedFiles;
-        private final Set<String> errorSummaries;
-        private final Set<String> warningSummaries;
-        private final Set<String> overwrittenFiles;
-        private final long totalFiles;
-        private final long totalDataSize;
-        private final AtomicLong dataCopied;
-        private long startTime;
-        private long endTime;
-
-        public Stats(long totalFiles, long totalDataSize) {
-            this.filesCopied = new AtomicInteger(0);
-            this.failedFiles = ConcurrentHashMap.newKeySet();
-            this.errorSummaries = ConcurrentHashMap.newKeySet();
-            this.warningSummaries = ConcurrentHashMap.newKeySet();
-            this.overwrittenFiles = ConcurrentHashMap.newKeySet();
-            this.totalFiles = totalFiles;
-            this.totalDataSize = totalDataSize;
-            this.dataCopied = new AtomicLong(0);
-            this.startTime = 0;
-            this.endTime = -1; // -1 represent that tak is incomplete
-        }
-
-        public int getFilesCopied() { return filesCopied.get(); }
-
-        public Set<String> getSkippedFiles() { return skippedFiles; }
-        public Set<String> getFailedFiles() { return failedFiles; }
-        public Set<String> getErrorSummaries() { return errorSummaries; }
-        public Set<String> getWarningSummaries() { return warningSummaries; }
-        public Set<String> getOverwrittenFiles() { return overwrittenFiles; }
-        public long getTotalFiles() { return totalFiles; }
-        public long getTotalDataSize() { return totalDataSize; }
-        public long getDataCopied() { return dataCopied.get(); }
-        public long getStartTime() { return startTime; }
-
-        @Override
-        public String toString() {
-            return "Stats{" +
-                    "filesCopied=" + filesCopied +
-                    ", skippedFiles=" + skippedFiles +
-                    ", failedFiles=" + failedFiles +
-                    ", errorSummaries=" + errorSummaries +
-                    ", warningSummaries=" + warningSummaries +
-                    ", overwrittenFiles=" + overwrittenFiles +
-                    ", totalFiles=" + totalFiles +
-                    ", totalDataSize=" + totalDataSize +
-                    ", dataCopied=" + dataCopied +
-                    ", startTime=" + startTime +
-                    ", endTime=" + endTime +
-                    '}';
-        }
-
-        public String summary() {
-            return "Files Copied=" + filesCopied +
-                    "\nFiles Skipped=" + skippedFiles.size() +
-                    "\nFiles Failed=" + failedFiles.size() +
-                    "\nFiles Overwritten=" + overwrittenFiles.size() +
-                    "\nTotal Files=" + totalFiles +
-                    "\nTotal Data=" + totalDataSize +
-                    "\nData Copied=" + dataCopied +
-                    "\nstartTime=" + startTime +
-                    "\nendTime=" + endTime;
-        }
-    }
 
     /**
      * Represents a single copy operation with its associated statistics and cancellation control.
@@ -123,28 +50,27 @@ public class DirectoryCopyUtil {
         private final Path source;
         private final Path target;
         private final List<Path> filesTobeCopies;
-        private final Stats stats;
+        private final CopyOperationStats stats;
         private volatile boolean cancelled = false;
         private final ExecutorService executor = Executors.newFixedThreadPool(threadPoolSize+1); //+1 for startCopy task
         ScheduledExecutorService progressExecutor;
         private Future<?> future; // Tracks the async copy task
+
+        private CopyOperation(Path source, Path target) throws IOException {
+            assertInput(source, target);
+            var preCalcStats = calculateTotalStats(source);
+            this.stats = new CopyOperationStats(preCalcStats.totalFiles, preCalcStats.totalDataSize, preCalcStats.skippedFiles);
+            this.filesTobeCopies = preCalcStats.fileList;
+            this.source = source;
+            this.target = target;
+            ensureDiskSpace(target, stats);
+        }
 
         private void shutdownExecutors() {
             if(progressExecutor != null) {
                 progressExecutor.shutdown();
             }
             executor.shutdown();
-        }
-
-        private CopyOperation(Path source, Path target) throws IOException {
-            assertInput(source, target);
-            var preCalcStats = calculateTotalStats(source);
-            this.stats = new Stats(preCalcStats.totalFiles, preCalcStats.totalDataSize);
-            this.filesTobeCopies = preCalcStats.fileList;
-            this.stats.skippedFiles.addAll(preCalcStats.skippedFiles);
-            this.source = source;
-            this.target = target;
-            ensureDiskSpace(target, stats);
         }
 
         // Start the copy operation and store the Future
@@ -178,20 +104,15 @@ public class DirectoryCopyUtil {
             return cancelled || (future != null && future.isCancelled());
         }
 
-        public Stats getStats() { return stats; }
+        public CopyOperationStats getStats() { return stats; }
 
-        public boolean isTerminated() {
-            return executor.isTerminated();
-        }
+        public boolean isTerminated() { return executor.isTerminated(); }
 
-        public boolean isDone() {
-            return future.isDone();
-        }
+        public boolean isRunning() { return !isDone() && !isCancelled(); }
 
-        public Future<?> getFuture() {
-            return future;
-        }
+        public boolean isDone() { return future.isDone(); }
 
+        public Future<?> getFuture() { return future; }
 
         private void copyAllFromSourceToTarget() throws IOException {
             logger.info("Total files to copy: {}", stats.getTotalFiles());
@@ -199,7 +120,7 @@ public class DirectoryCopyUtil {
 
             if (isSameVolume(source, target) && copyOptions.contains(StandardCopyOption.COPY_ATTRIBUTES)) {
                 String msg = "Note: Copying within the same volume, may use file cloning for speed";
-                stats.getWarningSummaries().add(msg);
+                stats.addWarning(msg);
                 logger.warn(msg);
             }
 
@@ -207,19 +128,19 @@ public class DirectoryCopyUtil {
                 try (Stream<Path> stream = Files.list(target)) {
                     if (stream.findAny().isPresent()) {
                         String msg = "Target directory " + target + " already contains files, some may be overwritten";
-                        stats.getWarningSummaries().add(msg);
+                        stats.addWarning(msg);
                         logger.warn("Target directory {} already contains files, some may be overwritten", target);
                     }
                 }
             }
 
-            stats.startTime = System.currentTimeMillis();
+            stats.markStarted();
             copyFilesAndDirectories(source, target);
-            stats.endTime = System.currentTimeMillis();
+            stats.markCompleted();
         }
 
         private void copyFilesAndDirectories(Path source, Path target) {
-            CountDownLatch latch = new CountDownLatch((int)stats.totalFiles);
+            CountDownLatch latch = new CountDownLatch((int) stats.getTotalFiles());
 
             for (Path item : filesTobeCopies) {
                 if (isCancelled()) {
@@ -274,8 +195,8 @@ public class DirectoryCopyUtil {
                 logger.debug("Created directory: {}", targetItem);
             } catch (IOException e) {
                 String message = "Error creating directory " + targetItem + ": " + e.getMessage();
-                stats.getErrorSummaries().add(message);
-                stats.getFailedFiles().add(targetItem.toString());
+                stats.addError(message);
+                stats.addFailedFile(targetItem.toString());
                 logger.error(message);
             }
         }
@@ -320,11 +241,11 @@ public class DirectoryCopyUtil {
                 // Check for existing file
                 if (Files.exists(target)) {
                     if (copyOptions.contains(StandardCopyOption.REPLACE_EXISTING)) {
-                        stats.getOverwrittenFiles().add(target.toString());
+                        stats.addOverwrittenFile(target.toString());
                         logger.warn("File will be overwritten: {}", target);
                     } else {
-                        stats.getFailedFiles().add(target.toString());
-                        stats.getErrorSummaries().add("File already exist:" + target);
+                        stats.addFailedFile(target.toString());
+                        stats.addError("File already exist:" + target);
                         return;
                     }
                 }
@@ -369,15 +290,15 @@ public class DirectoryCopyUtil {
                     }
                     out.write(buffer, 0, bytesRead);
                     totalBytesCopied += bytesRead;
-                    stats.dataCopied.addAndGet(bytesRead);
+                    stats.addCopiedData(bytesRead);
                 }
 
                 if (isCancelled()) {
                     out.close();
                     Files.deleteIfExists(target);
                     String msg = "Cancelled mid-copy: " + source;
-                    stats.getWarningSummaries().add(msg);
-                    stats.getFailedFiles().add(source.toString());
+                    stats.addWarning(msg);
+                    stats.addFailedFile(source.toString());
                     logger.warn(msg);
                     return;
                 }
@@ -391,7 +312,7 @@ public class DirectoryCopyUtil {
                 }
 
                 copyCompleted = true;
-                stats.filesCopied.incrementAndGet();
+                stats.incrementFilesCopied();
                 logger.debug("Copied large file: {}", source);
             } catch (Exception e) {
                 Files.deleteIfExists(target);
@@ -405,8 +326,8 @@ public class DirectoryCopyUtil {
         }
 
         private void recordFileCopyStats(Path source, long fileSize) {
-            stats.dataCopied.addAndGet(fileSize);
-            stats.filesCopied.incrementAndGet();
+            stats.addCopiedData(fileSize);
+            stats.incrementFilesCopied();
             logger.debug("Copied file: {}", source);
         }
 
@@ -417,9 +338,9 @@ public class DirectoryCopyUtil {
                     e.getClass().getSimpleName(),
                     path);
             logger.error(errMsg, e); // Log full exception stack trace
-            stats.getErrorSummaries().add(errMsg);
+            stats.addError(errMsg);
             if (path != null) {
-                stats.getFailedFiles().add(path.toString());
+                stats.addFailedFile(path.toString());
             }
         }
     }
@@ -441,9 +362,12 @@ public class DirectoryCopyUtil {
         private int threadPoolSize = Runtime.getRuntime().availableProcessors() * 8;
         private Set<CopyOption> copyOptions = Set.of(StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
         private int bufferSize = DEFAULT_BUFFER_SIZE;
-        private Consumer<Stats> progressCallback = stats -> {};
+        private Consumer<CopyOperationStats> progressCallback = stats -> {};
 
         public Builder progressUpdateInterval(long interval) {
+            if (interval <= 0) {
+                throw new IllegalStateException("Progress interval must be positive");
+            }
             this.progressUpdateInterval = interval;
             return this;
         }
@@ -469,7 +393,7 @@ public class DirectoryCopyUtil {
          * @param callback the callback to receive progress updates (can be null to disable)
          * @return this builder
          */
-        public Builder progressCallback(Consumer<Stats> callback) {
+        public Builder progressCallback(Consumer<CopyOperationStats> callback) {
             this.progressCallback = callback != null ? callback : stats -> {};
             return this;
         }
@@ -481,7 +405,7 @@ public class DirectoryCopyUtil {
 
     protected DirectoryCopyUtil(long progressUpdateInterval, int threadPoolSize,
                                 Set<CopyOption> copyOptions, int bufferSize,
-                                Consumer<Stats> progressCallback) {
+                                Consumer<CopyOperationStats> progressCallback) {
         if (progressUpdateInterval <= 0) {
             throw new IllegalArgumentException("Progress update interval must be positive");
         }
@@ -542,15 +466,15 @@ public class DirectoryCopyUtil {
         }
     }
 
-    private void ensureDiskSpace(Path target, Stats stats) throws IOException {
+    private void ensureDiskSpace(Path target, CopyOperationStats stats) throws IOException {
         FileStore fileStore = Files.getFileStore(target);
         long freeSpace = fileStore.getUsableSpace();
 
-        if (stats.totalDataSize > freeSpace) {
+        if (stats.getTotalDataSize() > freeSpace) {
             logger.warn("Not enough disk space on target. Copy operation might fail");
             throw new IOException("Not enough disk space on target: " + target);
-        } else if (stats.totalDataSize == 0) {
-            stats.getWarningSummaries().add("Warning: Source directory is empty.");
+        } else if (stats.getTotalDataSize() == 0) {
+            stats.addWarning("Warning: Source directory is empty.");
             logger.warn("Source directory is empty");
         }
     }
@@ -559,7 +483,7 @@ public class DirectoryCopyUtil {
         return Files.getFileStore(source).equals(Files.getFileStore(target));
     }
 
-    private ScheduledExecutorService setupProgressReporter(Stats stats) {
+    private ScheduledExecutorService setupProgressReporter(CopyOperationStats stats) {
         ScheduledExecutorService progressExecutor = Executors.newSingleThreadScheduledExecutor();
         progressExecutor.scheduleAtFixedRate(
                 () -> progressCallback.accept(stats),

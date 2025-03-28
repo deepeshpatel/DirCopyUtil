@@ -9,9 +9,9 @@ public class SimpleProgressCallback {
      * A simple progress callback that prints copy progress to the console.
      * @param stats the current statistics of the copy operation
      */
-    public static void simpleProgressCallback(DirectoryCopyUtil.Stats stats) {
+    public static void simpleProgressCallback(CopyOperationStats stats) {
         long currentTime = System.currentTimeMillis();
-        int copiedFiles = stats.getFilesCopied();
+        long copiedFiles = stats.getFilesCopied();
         long currentDataCopied = stats.getDataCopied();
         double progress = stats.getTotalDataSize() > 0 ? (double) currentDataCopied / stats.getTotalDataSize() * 100 : 100.0;
         long elapsedTime = currentTime - stats.getStartTime();

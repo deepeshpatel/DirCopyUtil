@@ -359,7 +359,7 @@ public class DirectoryCopyUtilTest {
             //   └── link → dir/../dir/file.txt (complex relative path)
 
             Path dir = Files.createDirectory(tempSourceDir.resolve("dir"));
-            Path file = createFile(dir, "file.txt", 100);
+            createFile(dir, "file.txt", 100);
             Path link = tempSourceDir.resolve("link");
             Files.createSymbolicLink(link, Path.of("dir/../dir/file.txt"));
 
@@ -371,11 +371,9 @@ public class DirectoryCopyUtilTest {
 
             // Path to the actual file in target
             Path f1 = tempTargetDir.resolve("dir/file.txt");
-            // Path of the copied symlink (not its target)
-            Path f2 = copiedLink;
 
             assertTrue(
-                    Files.isSameFile(f1, f2),
+                    Files.isSameFile(f1, copiedLink),
                     "Symlink should resolve to the same file as the target"
             );        }
 
@@ -387,7 +385,7 @@ public class DirectoryCopyUtilTest {
             //   └── linkB → real.txt
 
             // Create structure
-            Path realFile = createFile(tempSourceDir, "real.txt", 100);
+            createFile(tempSourceDir, "real.txt", 100);
             Path linkB = tempSourceDir.resolve("linkB");
             Path linkA = tempSourceDir.resolve("linkA");
             Files.createSymbolicLink(linkB, Path.of("real.txt"));
@@ -446,7 +444,7 @@ public class DirectoryCopyUtilTest {
 
             // 1. CREATE STRUCTURE EXPLICITLY
             Path dir = Files.createDirectory(tempSourceDir.resolve("dir"));
-            Path file = createFile(dir, "file.txt", 100); // Ensure this waits for file creation
+            createFile(dir, "file.txt", 100); // Ensure this waits for file creation
 
             // 2. CREATE SYMLINK
             Path link = tempSourceDir.resolve("link");
@@ -466,7 +464,7 @@ public class DirectoryCopyUtilTest {
 
         @Test
         void testSymlinkAttributesPreserved() throws Exception {
-            Path target = createFile(tempSourceDir, "target.txt", 100);
+            createFile(tempSourceDir, "target.txt", 100);
             Path link = tempSourceDir.resolve("link");
             Files.createSymbolicLink(link, Path.of("target.txt"));
 
@@ -499,7 +497,7 @@ public class DirectoryCopyUtilTest {
 
             // Setup: Count callback invocations with debug output
             AtomicInteger callbackCount = new AtomicInteger(0);
-            Consumer<DirectoryCopyUtil.Stats> callback = stats -> {
+            Consumer<CopyOperationStats> callback = stats -> {
                 callbackCount.incrementAndGet();
                 assertTrue(stats.getDataCopied() > 0, "Data copied should be positive during callback");
             };
@@ -534,7 +532,7 @@ public class DirectoryCopyUtilTest {
 
             // Setup: Count callback invocations
             AtomicInteger callbackCount = new AtomicInteger(0);
-            Consumer<DirectoryCopyUtil.Stats> callback = stats -> callbackCount.incrementAndGet();
+            Consumer<CopyOperationStats> callback = stats -> callbackCount.incrementAndGet();
 
             var copyUtil = new DirectoryCopyUtil.Builder()
                     .progressUpdateInterval(1)
@@ -572,7 +570,7 @@ public class DirectoryCopyUtilTest {
             // Setup: Track stats during copy
             AtomicInteger callbackCount = new AtomicInteger(0);
             AtomicLong lastDataCopied = new AtomicLong(0);
-            Consumer<DirectoryCopyUtil.Stats> callback = stats -> {
+            Consumer<CopyOperationStats> callback = stats -> {
                 callbackCount.incrementAndGet();
                 long currentDataCopied = stats.getDataCopied();
                 assertTrue(currentDataCopied >= lastDataCopied.get(), "Data copied should not decrease");
@@ -607,7 +605,7 @@ public class DirectoryCopyUtilTest {
             // Setup: Track callback timings during copy
             List<Long> callbackTimes = new ArrayList<>();
             AtomicLong copyCompletionTime = new AtomicLong(0);
-            Consumer<DirectoryCopyUtil.Stats> callback = stats -> {
+            Consumer<CopyOperationStats> callback = stats -> {
                 long time = System.currentTimeMillis();
                 // Only record callbacks before or at completion
                 if (copyCompletionTime.get() == 0 || time <= copyCompletionTime.get()) {
@@ -681,7 +679,7 @@ public class DirectoryCopyUtilTest {
             createFile(tempSourceDir,"large.txt", dataSze);
 
             AtomicLong dataCopiedBeforeCancel = new AtomicLong(0);
-            Consumer<DirectoryCopyUtil.Stats> callback = stats -> dataCopiedBeforeCancel.set(stats.getDataCopied());
+            Consumer<CopyOperationStats> callback = stats -> dataCopiedBeforeCancel.set(stats.getDataCopied());
 
             DirectoryCopyUtil slowUtil = new DirectoryCopyUtil.Builder()
                     .threadPoolSize(1)
@@ -714,7 +712,7 @@ public class DirectoryCopyUtilTest {
 
             CountDownLatch copyProgress = new CountDownLatch(1);
             AtomicInteger callbackCount = new AtomicInteger(0);
-            Consumer<DirectoryCopyUtil.Stats> progressCallback = stats -> {
+            Consumer<CopyOperationStats> progressCallback = stats -> {
                 callbackCount.incrementAndGet();
                 if (stats.getFilesCopied() >= 2) {
                     copyProgress.countDown();
@@ -762,7 +760,7 @@ public class DirectoryCopyUtilTest {
 
             // Setup: Count callback invocations
             AtomicInteger callbackCount = new AtomicInteger(0);
-            Consumer<DirectoryCopyUtil.Stats> callback = stats -> callbackCount.incrementAndGet();
+            Consumer<CopyOperationStats> callback = stats -> callbackCount.incrementAndGet();
 
             // Setup: Create a large file and slow copy
             DirectoryCopyUtil slowUtil = new DirectoryCopyUtil.Builder()
@@ -1502,7 +1500,7 @@ public class DirectoryCopyUtilTest {
             // Launch several copy operations concurrently from the same source to different targets.
             int operationCount = 3;
             ExecutorService executor = Executors.newFixedThreadPool(operationCount);
-            List<Future<DirectoryCopyUtil.Stats>> futures = new ArrayList<>();
+            List<Future<CopyOperationStats>> futures = new ArrayList<>();
             for (int i = 0; i < operationCount; i++) {
                 // Create a unique target directory for each copyOperation.
                 Path targetDir = Files.createTempDirectory(tempTargetDir, "target" + i);
@@ -1516,7 +1514,7 @@ public class DirectoryCopyUtilTest {
             assertTrue(executor.awaitTermination(30, TimeUnit.SECONDS));
 
             // Assert: Each copy operation should see the same file count and copy all files.
-            for (Future<DirectoryCopyUtil.Stats> future : futures) {
+            for (Future<CopyOperationStats> future : futures) {
                 var stats = future.get();
                 assertEquals(fileCount, stats.getTotalFiles(), "Total files should match");
                 assertEquals(fileCount, stats.getFilesCopied(), "All files should be copied");
@@ -1529,7 +1527,7 @@ public class DirectoryCopyUtilTest {
             // Setup: Create multiple source directories, each with a unique file.
             int operationCount = 3;
             ExecutorService executor = Executors.newFixedThreadPool(operationCount);
-            List<Future<DirectoryCopyUtil.Stats>> futures = new ArrayList<>();
+            List<Future<CopyOperationStats>> futures = new ArrayList<>();
             for (int i = 0; i < operationCount; i++) {
                 Path sourceDir = Files.createTempDirectory(tempSourceDir, "source" + i);
                 createFile(sourceDir, "file.txt", ("Content " + i).getBytes());
@@ -1546,7 +1544,7 @@ public class DirectoryCopyUtilTest {
             assertTrue(executor.awaitTermination(30, TimeUnit.SECONDS));
 
             // Assert: Each operation should have copied exactly one file.
-            for (Future<DirectoryCopyUtil.Stats> future : futures) {
+            for (Future<CopyOperationStats> future : futures) {
                 var stats = future.get();
                 assertEquals(1, stats.getTotalFiles(), "Each source should have one file");
                 assertEquals(1, stats.getFilesCopied(), "Each file should be copied");
@@ -1572,12 +1570,12 @@ public class DirectoryCopyUtilTest {
 
             // Launch both copy operations concurrently.
             ExecutorService executor = Executors.newFixedThreadPool(2);
-            Future<DirectoryCopyUtil.Stats> futureA = executor.submit(() -> {
+            Future<CopyOperationStats> futureA = executor.submit(() -> {
                 var copyOperation = copyUtil.copyDirectory(sourceDirA, targetDirA);
                 copyOperation.getFuture().get();
                 return copyOperation.getStats();
             });
-            Future<DirectoryCopyUtil.Stats> futureB = executor.submit(() -> {
+            Future<CopyOperationStats> futureB = executor.submit(() -> {
                 var copyOperation = copyUtil.copyDirectory(sourceDirB, targetDirB);
                 copyOperation.getFuture().get();
                 return copyOperation.getStats();
@@ -1605,7 +1603,7 @@ public class DirectoryCopyUtilTest {
             Files.writeString(initialFile, "initial");
 
             CountDownLatch progressLatch = new CountDownLatch(1);
-            Consumer<DirectoryCopyUtil.Stats> progressCallback = stats -> {
+            Consumer<CopyOperationStats> progressCallback = stats -> {
                 if (stats.getFilesCopied() > 0) {
                     progressLatch.countDown();
                 }
@@ -1617,7 +1615,7 @@ public class DirectoryCopyUtilTest {
                     .build();
 
             ExecutorService copyExecutor = Executors.newSingleThreadExecutor();
-            Future<DirectoryCopyUtil.Stats> copyFuture = copyExecutor.submit(() -> {
+            Future<CopyOperationStats> copyFuture = copyExecutor.submit(() -> {
                 var copyOperation = copyUtil.copyDirectory(tempSourceDir, tempTargetDir);
                 copyOperation.getFuture().get(30, TimeUnit.SECONDS);
                 return copyOperation.getStats();
