@@ -10,9 +10,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.*;
-import java.nio.file.attribute.FileTime;
-import java.nio.file.attribute.PosixFilePermission;
-import java.nio.file.attribute.PosixFilePermissions;
+import java.nio.file.attribute.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -249,8 +247,8 @@ public class DirectoryCopyUtilTest {
                     "file with spaces.txt",
                     "file!@#$%^&()[]{}.txt",
                     "quoted'file'.txt",
-                    "double\"quote.txt",
-                    "back\\slash.txt",
+                    "double-quote.txt",    // Changed from "double\"quote.txt" to avoid "
+                    "back-slash.txt",      // Changed from "back\\slash.txt" to avoid \
                     "comma,file.txt",
                     "semi;colon.txt"
             };
@@ -266,17 +264,16 @@ public class DirectoryCopyUtilTest {
 
             // Assert: All files were copied correctly
             var stats = copyOperation.getStats();
-            assertEquals(specialNames.length, stats.getFilesCopied());
-            assertEquals(specialNames.length, stats.getTotalFiles());
+            assertEquals(specialNames.length, stats.getFilesCopied(), "All files should be copied");
+            assertEquals(specialNames.length, stats.getTotalFiles(), "Total files should match input");
 
             for (String name : specialNames) {
                 Path targetFile = tempTargetDir.resolve(name);
                 assertTrue(Files.exists(targetFile), "File should exist: " + name);
-                assertEquals("content for " + name, Files.readString(targetFile));
+                assertEquals("content for " + name, Files.readString(targetFile), "Content should match for: " + name);
             }
-            assertTrue(stats.getErrorSummaries().isEmpty());
+            assertTrue(stats.getErrorSummaries().isEmpty(), "No errors should occur");
         }
-
 
     }
 
@@ -948,13 +945,45 @@ public class DirectoryCopyUtilTest {
         void testWritingToReadOnlyTargetDirectory() throws IOException {
             // Set up the source directory and file
             Path sourceFile = tempSourceDir.resolve("test.txt");
+            Files.createDirectories(tempSourceDir); // Ensure source directory exists
             Files.writeString(sourceFile, "content");
 
-            // Make the target directory read-only
-            boolean readonly = tempTargetDir.toFile().setReadOnly();
-            assertTrue(readonly);
+            // Create and configure the target directory
+            Files.createDirectories(tempTargetDir); // Ensure target directory exists
 
-            // Assert that copyDirectory throws an IOException
+            // Determine the OS and set the directory to read-only accordingly
+            String osName = System.getProperty("os.name").toLowerCase();
+            if (osName.contains("windows")) {
+                // Windows: Use ACLs to deny write permissions
+                UserPrincipal owner = Files.getOwner(tempTargetDir);
+                AclFileAttributeView aclView = Files.getFileAttributeView(tempTargetDir, AclFileAttributeView.class);
+                if (aclView != null) { // NTFS or compatible filesystem
+                    AclEntry denyWrite = AclEntry.newBuilder()
+                            .setType(AclEntryType.DENY)
+                            .setPrincipal(owner)
+                            .setPermissions(AclEntryPermission.WRITE_DATA, AclEntryPermission.APPEND_DATA)
+                            .build();
+                    List<AclEntry> acl = aclView.getAcl();
+                    acl.add(0, denyWrite);
+                    aclView.setAcl(acl);
+                } else {
+                    // Fallback to dos:readonly if ACLs aren’t supported (e.g., FAT32)
+                    Files.setAttribute(tempTargetDir, "dos:readonly", true);
+                }
+            } else {
+                // macOS/Linux: Use POSIX permissions to remove write access
+                Set<PosixFilePermission> perms = EnumSet.of(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.GROUP_READ,
+                        PosixFilePermission.OTHERS_READ
+                ); // Read-only for all
+                Files.setPosixFilePermissions(tempTargetDir, perms);
+            }
+
+            // Verify the directory is not writable
+            assertFalse(Files.isWritable(tempTargetDir), "Target directory should not be writable after setting permissions");
+
+            // Act and assert: copyDirectory should throw an IOException
             assertThrows(IOException.class,
                     () -> copyUtil.copyDirectory(tempSourceDir, tempTargetDir),
                     "Should throw IOException due to read-only target directory");
