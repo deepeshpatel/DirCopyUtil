@@ -59,6 +59,7 @@ public class DirectoryCopyUtil {
         private final long totalDataSize;
         private final AtomicLong dataCopied;
         private long startTime;
+        private long endTime;
 
         public Stats(long totalFiles, long totalDataSize) {
             this.filesCopied = new AtomicInteger(0);
@@ -70,6 +71,7 @@ public class DirectoryCopyUtil {
             this.totalDataSize = totalDataSize;
             this.dataCopied = new AtomicLong(0);
             this.startTime = 0;
+            this.endTime = -1; // -1 represent that tak is incomplete
         }
 
         public int getFilesCopied() { return filesCopied.get(); }
@@ -83,7 +85,7 @@ public class DirectoryCopyUtil {
         public long getTotalDataSize() { return totalDataSize; }
         public long getDataCopied() { return dataCopied.get(); }
         public long getStartTime() { return startTime; }
-        public void setStartTime(long startTime) { this.startTime = startTime; }
+        //public void setStartTime(long startTime) { this.startTime = startTime; }
 
         @Override
         public String toString() {
@@ -210,11 +212,12 @@ public class DirectoryCopyUtil {
                 }
             }
 
-            stats.setStartTime(System.currentTimeMillis());
-            copyFilesAndDirectories(source, target, executor);
+            stats.startTime = System.currentTimeMillis();
+            copyFilesAndDirectories(source, target);
+            stats.endTime = System.currentTimeMillis();
         }
 
-        private void copyFilesAndDirectories(Path source, Path target, ExecutorService executor) {
+        private void copyFilesAndDirectories(Path source, Path target) {
 
             CountDownLatch latch = new CountDownLatch((int)stats.totalFiles);
 
@@ -227,7 +230,7 @@ public class DirectoryCopyUtil {
                 Path targetItem = target.resolve(source.relativize(item));
 
                 if(isDirectory(item)) {
-                    createDirectory(targetItem, stats);
+                    createDirectory(targetItem);
                     continue;
                 }
 
@@ -254,6 +257,18 @@ public class DirectoryCopyUtil {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 handleError("Copy operation interrupted: ", e, null);
+            }
+        }
+
+        private void createDirectory(Path targetItem) {
+            try {
+                Files.createDirectories(targetItem);
+                logger.debug("Created directory: {}", targetItem);
+            } catch (IOException e) {
+                String message = "Error creating directory " + targetItem + ": " + e.getMessage();
+                stats.getErrorSummaries().add(message);
+                stats.getFailedFiles().add(targetItem.toString());
+                logger.error(message);
             }
         }
 
@@ -552,18 +567,6 @@ public class DirectoryCopyUtil {
                 TimeUnit.SECONDS
         );
         return progressExecutor;
-    }
-
-    private void createDirectory(Path targetItem, Stats stats) {
-        try {
-            Files.createDirectories(targetItem);
-            logger.debug("Created directory: {}", targetItem);
-        } catch (IOException e) {
-            String message = "Error creating directory " + targetItem + ": " + e.getMessage();
-            stats.getErrorSummaries().add(message);
-            stats.getFailedFiles().add(targetItem.toString());
-            logger.error(message);
-        }
     }
 
     /**
